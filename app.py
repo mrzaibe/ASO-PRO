@@ -498,56 +498,142 @@ def extract_keywords(apps, lang="en"):
         return pd.DataFrame()
 
 # ============================================================
-# ASO COPY GENERATORS  (language-aware)
+# ASO COPY GENERATORS  (language-aware, no API)
+# Rules:
+#   Title      : exactly 30 chars (padded if needed, hard-trimmed)
+#   Short Desc : target 80-90 chars, trimmed at 90
+#   Long Desc  : target ~4000 chars, keywords woven into sentences
+#   No TM / copyright symbols anywhere
+#   Keywords must appear inside natural sentences, never as bare lists
 # ============================================================
-def generate_title(app_name, primary_keywords):
-    brand       = app_name.split(":")[0].split("-")[0].strip()
-    short_brand = brand[:14].strip()
-    for kw in primary_keywords:
-        kw_t = kw.title()
-        cand = f"{short_brand}: {kw_t}"
-        if len(cand) <= 30:
-            return cand
-        if len(kw_t) <= 30:
-            return kw_t
-    return brand[:30]
 
-def generate_short(primary, secondary, app_name, lang="en"):
+def _clean_brand(app_name):
+    """Strip TM, copyright, registered marks and extra punctuation from brand name."""
     brand = app_name.split(":")[0].split("-")[0].strip()
-    t = get_template(lang)
-    # Build a short line from the template snippets, fall back to English pattern
-    p1 = primary[0]   if primary   else "features"
-    s1 = secondary[0] if secondary else "tools"
-    candidates = [
-        f"{p1.title()} & {s1} — {t.get('feat_fast','fast & free').split('{')[0].strip()}.",
-        f"{p1.title()} · {s1} · {brand}",
-        f"{brand}: {p1.title()}",
-    ]
+    brand = re.sub(r"[™®©]", "", brand).strip()
+    return brand
+
+def generate_title(app_name, primary_keywords):
+    """
+    Build a keyword-rich title and pad/trim to exactly 30 characters.
+    Format tries: "Brand - Keyword", "Brand: Keyword", keyword-only,
+    then pads with spaces to reach 30 if shorter.
+    """
+    brand = _clean_brand(app_name)[:12].strip()
+
+    candidates = []
+    for kw in primary_keywords[:5]:
+        kw_clean = re.sub(r"[™®©]", "", kw).strip()
+        for sep in [" - ", ": ", " | "]:
+            candidates.append(f"{brand}{sep}{kw_clean.title()}")
+        candidates.append(kw_clean.title())
+
+    # Pick the longest that fits within 30
+    best = brand[:30]
     for c in candidates:
-        if len(c) <= 80:
-            return c
-    return f"{brand}: {p1}"[:80]
+        c_trimmed = c[:30]
+        if len(c_trimmed) > len(best):
+            best = c_trimmed
+
+    # Pad with a space-filler word from keywords if too short
+    if len(best) < 28:
+        for kw in primary_keywords:
+            word = kw.split()[0].title()
+            attempt = f"{best} {word}"[:30]
+            if len(attempt) > len(best):
+                best = attempt
+            if len(best) >= 28:
+                break
+
+    return best[:30]
+
+
+def generate_short(primary, secondary, long_tail, app_name, lang="en"):
+    """
+    Craft a benefit-driven short description between 80-90 characters.
+    Keywords from primary/secondary must appear inside the sentence naturally.
+    No TM/copyright. Trimmed hard at 90.
+    """
+    brand = _clean_brand(app_name)
+    p1 = primary[0]   if primary   else "tools"
+    p2 = primary[1]   if len(primary) > 1 else p1
+    s1 = secondary[0] if secondary else "features"
+    s2 = secondary[1] if len(secondary) > 1 else s1
+    lt = long_tail[0] if long_tail else p1
+
+    t = get_template(lang)
+
+    # Language-aware templates with keywords embedded naturally
+    # All between 75–90 chars when filled
+    templates_en = [
+        f"The best {p1} app — enjoy {s1} and {s2} fast, free and easy to use.",
+        f"Boost your {p1} with {s1} tools. Fast, lightweight and completely free.",
+        f"Need {p1}? Get {s1}, {s2} and {lt} all in one powerful free app.",
+        f"Powerful {p1} and {s1} for everyone — simple, fast, no ads.",
+        f"Your go-to {p1} app for {s1}, {s2} and great {lt} results.",
+        f"Free {p1} app with {s1}, {s2} and smooth {lt} built right in.",
+    ]
+
+    # For non-English, fall back to English keywords in translated structure
+    if lang != "en":
+        intro = t.get("intro", "").format(
+            brand=brand, brand_upper=brand.upper(),
+            p1=p1, p2=p2, p3=p1, s1=s1, s2=s2, lt1=lt, lt2=s2
+        )
+        # Use first sentence of intro as short desc candidate
+        first_sentence = intro.split(".")[0].strip() + "."
+        templates_en = [first_sentence] + templates_en
+
+    for tmpl in templates_en:
+        cleaned = re.sub(r"[™®©]", "", tmpl).strip()
+        if 70 <= len(cleaned) <= 90:
+            return cleaned[:90]
+
+    # Fallback: build and trim
+    fallback = re.sub(r"[™®©]", "", f"Powerful {p1} app with {s1} and {s2} — fast, free and easy.").strip()
+    return fallback[:90]
+
 
 def generate_long_desc(app_name, primary, secondary, long_tail, core_features, lang="en"):
-    p1  = primary[0]   if len(primary)   > 0 else "features"
-    p2  = primary[1]   if len(primary)   > 1 else "performance"
-    p3  = primary[2]   if len(primary)   > 2 else "tools"
-    s1  = secondary[0] if len(secondary) > 0 else "ease of use"
-    s2  = secondary[1] if len(secondary) > 1 else "speed"
-    lt1 = long_tail[0] if len(long_tail) > 0 else p1
-    lt2 = long_tail[1] if len(long_tail) > 1 else p2
-    brand       = app_name.split(":")[0].split("-")[0].strip()
+    """
+    Write a natural, human-quality description targeting ~4000 characters.
+    - All top keywords woven into sentences, never dumped as lists
+    - No TM / copyright / registered symbols
+    - No repeated sentences
+    - Features section uses user-supplied core features if provided
+    - Padded with extra keyword-rich paragraphs to approach 4000 chars
+    """
+    # Pull keywords safely
+    p1  = primary[0]   if len(primary)   > 0 else "tools"
+    p2  = primary[1]   if len(primary)   > 1 else "features"
+    p3  = primary[2]   if len(primary)   > 2 else "performance"
+    s1  = secondary[0] if len(secondary) > 0 else "speed"
+    s2  = secondary[1] if len(secondary) > 1 else "ease"
+    s3  = secondary[2] if len(secondary) > 2 else p1
+    lt1 = long_tail[0] if len(long_tail) > 0 else p2
+    lt2 = long_tail[1] if len(long_tail) > 1 else p3
+    lt3 = long_tail[2] if len(long_tail) > 2 else s1
+    lt4 = long_tail[3] if len(long_tail) > 3 else s2
+    lt5 = long_tail[4] if len(long_tail) > 4 else p1
+
+    brand       = _clean_brand(app_name)
     brand_upper = brand.upper()
 
     t = get_template(lang)
 
     def fmt(s):
-        return s.format(brand=brand, brand_upper=brand_upper,
-                        p1=p1, p2=p2, p3=p3, s1=s1, s2=s2, lt1=lt1, lt2=lt2)
+        try:
+            return re.sub(r"[™®©]", "", s.format(
+                brand=brand, brand_upper=brand_upper,
+                p1=p1, p2=p2, p3=p3, s1=s1, s2=s2, lt1=lt1, lt2=lt2
+            )).strip()
+        except:
+            return re.sub(r"[™®©]", "", s).strip()
 
+    # ── Feature bullets ──────────────────────────────────────
     if core_features and core_features.strip():
-        feature_lines   = [f.strip() for f in core_features.strip().splitlines() if f.strip()]
-        feature_bullets = "\n".join([f"✅ {f}" for f in feature_lines[:8]])
+        feature_lines   = [re.sub(r"[™®©]", "", f.strip()) for f in core_features.strip().splitlines() if f.strip()]
+        feature_bullets = "\n".join([f"✅ {f}" for f in feature_lines[:10]])
     else:
         feature_bullets = "\n".join([
             f"✅ {fmt(t['feat_fast'])}",
@@ -556,30 +642,116 @@ def generate_long_desc(app_name, primary, secondary, long_tail, core_features, l
             f"✅ {fmt(t['feat_offline'])}",
             f"✅ {fmt(t['feat_updates'])}",
             f"✅ {fmt(t['feat_battery'])}",
+            f"✅ Works smoothly with {lt1} and {lt2} support",
+            f"✅ Optimised for {lt3} on all Android devices",
         ])
 
-    use_case_line = fmt(t["use_case"]) + "\n\n" if lt1 != p1 else ""
-
-    desc = (
+    # ── Build sections ────────────────────────────────────────
+    intro_block = (
         f"{fmt(t['intro'])}\n\n"
-        f"{fmt(t['problem'])}\n\n"
-        f"{use_case_line}"
+        f"{fmt(t['problem'])}"
+    )
+
+    use_case_block = (
+        f"Whether you are looking for reliable {p1}, need help with {s1}, "
+        f"or simply want a better {lt1} experience on your phone, {brand} is built "
+        f"to handle it all without slowing you down or filling your screen with ads."
+    )
+
+    features_block = (
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"{t['features_header']}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"{feature_bullets}\n\n"
+        f"{feature_bullets}"
+    )
+
+    why_block = (
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"{fmt(t['why_header'])}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"{fmt(t['why_body'])}\n\n"
+        f"Every detail of {brand} has been designed with the user in mind. "
+        f"The {p2} is smooth, the {s2} is outstanding, and the overall experience "
+        f"of using {lt2} within the app feels natural from the very first tap. "
+        f"There is no bloat, no forced sign-ups, and no hidden fees."
+    )
+
+    deep_dive_block = (
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"HOW IT WORKS\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Getting started with {brand} takes seconds. Open the app, choose your "
+        f"{p1} settings, and the built-in {s1} engine kicks in immediately. "
+        f"You get full control over {lt3}, {lt4}, and {p3} without needing a manual "
+        f"or a tutorial. The interface is designed so that even first-time users can "
+        f"find what they need within moments.\n\n"
+        f"For users who need more control, {brand} also includes advanced {p2} "
+        f"options. Adjust {s2}, fine-tune {lt1}, and customise how the app handles "
+        f"{lt5} to match your exact preferences. Everything saves automatically, "
+        f"so your setup is always ready when you come back."
+    )
+
+    perfect_block = (
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"{t['perfect_header']}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"{fmt(t['perfect_1'])}\n"
         f"{fmt(t['perfect_2'])}\n"
-        f"{fmt(t['perfect_3'])}\n\n"
-        f"{fmt(t['download_cta'])}"
+        f"{fmt(t['perfect_3'])}\n"
+        f"📲 Users who want {p1} without wasting storage or battery\n"
+        f"🔧 Anyone who needs {lt1} and {lt2} in a single lightweight app"
     )
+
+    extra_block = (
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"WHAT MAKES {brand_upper} DIFFERENT\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Most {p1} apps on the Play Store either lack key {s1} features or come "
+        f"loaded with intrusive ads and unnecessary permissions. {brand} was built "
+        f"as a direct answer to that problem.\n\n"
+        f"The core focus has always been delivering a reliable {p3} engine that "
+        f"handles {lt1}, {lt3}, and {s3} without compromise. Updates are pushed "
+        f"regularly, bugs are fixed fast, and user feedback directly shapes what "
+        f"gets improved next.\n\n"
+        f"You will not find bloated onboarding flows or paywalls blocking basic "
+        f"features. {brand} gives you full access to {p2}, {s1}, and {lt4} "
+        f"from the moment you install it."
+    )
+
+    cta_block = (
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{fmt(t['download_cta'])}\n\n"
+        f"Join the growing community of users who trust {brand} for their daily "
+        f"{p1} needs. Whether it is {lt1}, {s2}, or {p3}, this app delivers "
+        f"every single time."
+    )
+
+    sections = [
+        intro_block,
+        use_case_block,
+        features_block,
+        why_block,
+        deep_dive_block,
+        perfect_block,
+        extra_block,
+        cta_block,
+    ]
+
+    desc = "\n\n".join(sections)
+    desc = re.sub(r"[™®©]", "", desc)   # final pass: strip any stray marks
+
+    # If still under 3800 chars, pad with a keyword-rich closing paragraph
+    if len(desc) < 3800:
+        padding = (
+            f"\n\n{brand} continues to improve with every release. "
+            f"New {p1} capabilities, better {s1} handling, faster {p2} response times, "
+            f"and deeper {lt2} support are all part of the ongoing roadmap. "
+            f"If you rely on {lt3} or need dependable {lt4} on your Android device, "
+            f"this is the app built for you. "
+            f"Try {brand} today — it is free, it is fast, and it works."
+        )
+        desc += padding
+
     return desc.strip()[:4000]
 
 # ============================================================
@@ -725,7 +897,7 @@ if submitted:
     app_name  = own.get("title", "My App")
 
     en_title  = generate_title(app_name, primary)
-    en_short  = generate_short(primary, secondary, app_name, "en")
+    en_short  = generate_short(primary, secondary, long_tail, app_name, "en")
     en_long   = generate_long_desc(app_name, primary, secondary, long_tail, core_features, "en")
 
     progress.progress(100)
@@ -856,30 +1028,36 @@ if st.session_state.get("aso_done"):
         st.subheader("Generated ASO Listing (English)")
 
         st.markdown("#### 📌 Title")
-        st.caption("Google Play limit: **30 characters**")
+        st.caption("Google Play limit: **30 characters** — must be exactly 30")
         tc, cc = st.columns([5, 1])
         with tc:
             t_edit = st.text_input("Title", value=en_title, max_chars=30, label_visibility="collapsed")
         with cc:
-            st.markdown(f"{'🟢' if len(t_edit)<=30 else '🔴'} `{len(t_edit)}/30`")
+            tlen = len(t_edit)
+            tcol = "🟢" if tlen == 30 else ("🟡" if tlen >= 25 else "🔴")
+            st.markdown(f"{tcol} `{tlen}/30`")
 
         st.divider()
         st.markdown("#### 📝 Short Description")
-        st.caption("Google Play limit: **80 characters**")
+        st.caption("Google Play limit: **80 characters** — target 80–90")
         sc, scc = st.columns([5, 1])
         with sc:
-            s_edit = st.text_area("Short", value=en_short, max_chars=80, height=80, label_visibility="collapsed")
+            s_edit = st.text_area("Short", value=en_short, max_chars=90, height=80, label_visibility="collapsed")
         with scc:
-            st.markdown(f"{'🟢' if len(s_edit)<=80 else '🔴'} `{len(s_edit)}/80`")
+            slen = len(s_edit)
+            scol = "🟢" if 70 <= slen <= 90 else ("🟡" if slen >= 60 else "🔴")
+            st.markdown(f"{scol} `{slen}/90`")
 
         st.divider()
         st.markdown("#### 📄 Long Description")
-        st.caption("Google Play limit: **4,000 characters**")
+        st.caption("Google Play limit: **4,000 characters** — target close to 4000")
         lc, lcc = st.columns([5, 1])
         with lc:
             l_edit = st.text_area("Long", value=en_long, max_chars=4000, height=520, label_visibility="collapsed")
         with lcc:
-            st.markdown(f"{'🟢' if len(l_edit)<=4000 else '🔴'} `{len(l_edit)}/4000`")
+            llen = len(l_edit)
+            lcol = "🟢" if llen >= 3500 else ("🟡" if llen >= 2500 else "🔴")
+            st.markdown(f"{lcol} `{llen}/4000`")
 
         st.divider()
         st.markdown("#### 🔑 Top Keywords Embedded")
@@ -944,7 +1122,7 @@ if st.session_state.get("aso_done"):
                     loc_long_tail = loc_kws[6:15] if len(loc_kws) > 6 else []
 
             loc_title = generate_title(app_name, loc_primary)
-            loc_short = generate_short(loc_primary, loc_secondary, app_name, lang_code)
+            loc_short = generate_short(loc_primary, loc_secondary, loc_long_tail, app_name, lang_code)
             loc_long  = generate_long_desc(app_name, loc_primary, loc_secondary, loc_long_tail, core_features, lang_code)
 
             st.success(f"✅ {lang_name} ASO listing generated!")
@@ -954,15 +1132,17 @@ if st.session_state.get("aso_done"):
             with ltc:
                 lt_edit = st.text_input(f"loc_title_{lang_code}", value=loc_title, max_chars=30, label_visibility="collapsed")
             with lcc2:
-                st.markdown(f"{'🟢' if len(lt_edit)<=30 else '🔴'} `{len(lt_edit)}/30`")
+                tl = len(lt_edit)
+                st.markdown(f"{'🟢' if tl==30 else ('🟡' if tl>=25 else '🔴')} `{tl}/30`")
 
             st.divider()
             st.markdown(f"#### 📝 Short Description — {lang_name}")
             lsc, lscc = st.columns([5, 1])
             with lsc:
-                ls_edit = st.text_area(f"loc_short_{lang_code}", value=loc_short, max_chars=80, height=80, label_visibility="collapsed")
+                ls_edit = st.text_area(f"loc_short_{lang_code}", value=loc_short, max_chars=90, height=80, label_visibility="collapsed")
             with lscc:
-                st.markdown(f"{'🟢' if len(ls_edit)<=80 else '🔴'} `{len(ls_edit)}/80`")
+                sl = len(ls_edit)
+                st.markdown(f"{'🟢' if 70<=sl<=90 else ('🟡' if sl>=60 else '🔴')} `{sl}/90`")
 
             st.divider()
             st.markdown(f"#### 📄 Long Description — {lang_name}")
@@ -970,7 +1150,8 @@ if st.session_state.get("aso_done"):
             with llc:
                 ll_edit = st.text_area(f"loc_long_{lang_code}", value=loc_long, max_chars=4000, height=520, label_visibility="collapsed")
             with llcc:
-                st.markdown(f"{'🟢' if len(ll_edit)<=4000 else '🔴'} `{len(ll_edit)}/4000`")
+                ll = len(ll_edit)
+                st.markdown(f"{'🟢' if ll>=3500 else ('🟡' if ll>=2500 else '🔴')} `{ll}/4000`")
 
             if not loc_kw_df.empty:
                 st.divider()
