@@ -9,12 +9,21 @@ from urllib.parse import urlparse, parse_qs
 from google_play_scraper import search as gp_search, app as gp_app
 from sklearn.feature_extraction.text import CountVectorizer
 
+# ---------- NLTK SAFE LOAD (IMPORTANT) ----------
 import nltk
+
+try:
+    nltk.data.find('tokenizers/punkt')
+except:
+    nltk.download('punkt')
+
+try:
+    nltk.data.find('corpora/stopwords')
+except:
+    nltk.download('stopwords')
+
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
-
-nltk.download("punkt", quiet=True)
-nltk.download("stopwords", quiet=True)
 
 STOP_WORDS = set(stopwords.words("english"))
 
@@ -68,6 +77,9 @@ def get_competitors(seed_keywords, country):
 def extract_keywords(apps):
     docs = [a["title"] + " " + a["desc"] for a in apps]
 
+    if not docs:
+        return pd.DataFrame()
+
     vectorizer = CountVectorizer(stop_words="english", ngram_range=(2, 3), max_features=120)
     X = vectorizer.fit_transform(docs)
 
@@ -101,6 +113,9 @@ def generate_title(app_name, primary):
 
 # ---------- SHORT DESC ----------
 def generate_short(primary, secondary):
+    if len(primary) == 0:
+        return "Best app experience for your needs"
+
     if len(secondary) < 2:
         return primary[0]
 
@@ -140,7 +155,7 @@ def generate_long_desc(app_name, primary, secondary, long_tail):
         "👤 Everyday users\n📱 Mobile users\n⚡ Fast workflows\n🎯 Efficient results"
     )
 
-    # SEO Boost
+    # SEO boost
     for i in range(4):
         sections.append(
             f"\nExplore {primary[0]}, improve {secondary[0]}, and enhance {secondary[1]} "
@@ -174,7 +189,6 @@ if st.button("Analyze"):
         st.error("Failed to fetch app")
         st.stop()
 
-    # 🔥 Dynamic seed
     seed = extract_seed_keywords(own["title"] + " " + own["desc"])
 
     apps = [own]
@@ -186,20 +200,35 @@ if st.button("Analyze"):
                 data = get_app_data(aid, c)
                 if data:
                     apps.append(data)
-                time.sleep(0.3)
+                time.sleep(0.2)
 
     df = pd.DataFrame(apps)
     kw_df = extract_keywords(apps)
 
-    # -------- TABS -------- #
+    if kw_df.empty:
+        st.error("Keyword extraction failed. Try another app.")
+        st.stop()
+
+    keywords = kw_df["keyword"].tolist()
+
+    if len(keywords) < 6:
+        st.error("Not enough keyword data. Try another app.")
+        st.stop()
+
+    primary = keywords[:3]
+    secondary = keywords[3:6]
+    long_tail = keywords[6:15] if len(keywords) > 6 else []
+
+    title = generate_title(own["title"], primary)
+    short = generate_short(primary, secondary)
+    long = generate_long_desc(own["title"], primary, secondary, long_tail)
+
     tab1, tab2, tab3 = st.tabs(["📊 Overview", "📈 Keywords", "🧠 ASO Output"])
 
-    # -------- OVERVIEW -------- #
     with tab1:
         st.dataframe(df)
         st.download_button("Download CSV", df.to_csv(index=False), "competitors.csv")
 
-    # -------- KEYWORDS -------- #
     with tab2:
         st.dataframe(kw_df)
 
@@ -208,18 +237,7 @@ if st.button("Analyze"):
 
         st.download_button("Download Keywords", kw_df.to_csv(index=False), "keywords.csv")
 
-    # -------- ASO -------- #
     with tab3:
-        keywords = kw_df["keyword"].tolist()
-
-        primary = keywords[:3]
-        secondary = keywords[3:6]
-        long_tail = keywords[6:15]
-
-        title = generate_title(own["title"], primary)
-        short = generate_short(primary, secondary)
-        long = generate_long_desc(own["title"], primary, secondary, long_tail)
-
         st.text_area("Title", title)
         st.text_area("Short Description", short)
         st.text_area("Long Description", long, height=500)
